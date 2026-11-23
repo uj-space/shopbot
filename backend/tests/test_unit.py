@@ -438,3 +438,20 @@ def test_order_status_patch_returns_400_on_insufficient_stock():
     res = client.patch(f"/api/orders/{order['id']}/status", json={"status": "confirmed"})
     assert res.status_code == 400
     assert "Insufficient stock" in res.json()["detail"]
+
+
+def test_pure_greeting_uses_zero_tokens():
+    from langchain_core.messages import HumanMessage
+    from app.graph import router_node
+
+    client = TestClient(app)
+    res = client.post("/chat", json={"user_id": "greet_u", "thread_id": "g1", "message": "Hello!"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["tokens"] == {"in": 0, "out": 0}
+    assert body["tool_calls"] == []
+    assert "Khaas Studio" in body["reply"]
+
+    # Non-pure greeting with product request must route to sales_advisor
+    r = router_node({"messages": [HumanMessage(content="Hello, show me kurtas")]}, {"configurable": {}})
+    assert r["route"] == "sales_advisor"

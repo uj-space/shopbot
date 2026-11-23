@@ -67,7 +67,7 @@ def _is_turn_confirmed(config: RunnableConfig | None = None) -> bool:
 
 @tool
 def search_catalog(query: str = "", category: str = "", max_price_pkr: int | None = None) -> str:
-    """Search Khaas Studio's live product catalog by keyword, category, or max price in PKR."""
+    """Search store products by query, category, or max PKR price."""
     items = db.list_products(query=query, category=category, max_price=max_price_pkr)
     if not items and query.strip():
         raw_tokens = re.findall(r"[a-z0-9-]+", query.lower())
@@ -90,47 +90,49 @@ def search_catalog(query: str = "", category: str = "", max_price_pkr: int | Non
             sorted_hits = sorted(hits_by_id.values(), key=lambda pair: (-pair[0], pair[1]["id"]))
             items = [pair[1] for pair in sorted_hits]
     if not items:
-        return "No matching products found in the catalog."
-    lines = []
-    for p in items[:10]:
-        lines.append(
-            f"[{p['id']}] {p['name']} ({p['category']}) — PKR {p['price_pkr']} | "
-            f"Sizes: {p['sizes']} | Color: {p['color']} | Stock: {p['stock']} | {p['description']}"
-        )
-    return "\n".join(lines)
+        return "No matching products found."
+    return "\n".join(
+        f"[{p['id']}] {p['name']} ({p['category']}) | PKR {p['price_pkr']} | Sizes: {p['sizes']} | {p['color']} | Stock: {p['stock']}"
+        for p in items[:6]
+    )
 
 
 @tool
 def get_upsell_recommendations(product_id_or_name: str) -> str:
-    """Find complementary upsell items or accessories that pair well with a product."""
+    """Get a product's details plus matching upsell pairings."""
     prod = db.find_product(product_id_or_name)
     if not prod:
-        return f"Product '{product_id_or_name}' was not found in the catalog."
+        return f"Product '{product_id_or_name}' not found."
     upsell_ids = [uid.strip() for uid in (prod.get("upsell_with") or "").split(",") if uid.strip()]
     recs = []
     for uid in upsell_ids:
         item = db.find_product(uid)
         if item and item["stock"] > 0:
-            recs.append(f"[{item['id']}] {item['name']} — PKR {item['price_pkr']} ({item['color']}, Stock: {item['stock']})")
+            recs.append(f"[{item['id']}] {item['name']} | PKR {item['price_pkr']} | {item['color']} | Stock: {item['stock']}")
     if not recs:
         fallback = [p for p in db.list_products(category="Accessories") if p["id"] != prod["id"] and p["stock"] > 0]
-        recs = [f"[{p['id']}] {p['name']} — PKR {p['price_pkr']} ({p['color']})" for p in fallback[:2]]
-    return f"Recommended pairings for {prod['name']}:\n" + ("\n".join(recs) if recs else "No pairing items currently in stock.")
+        recs = [f"[{p['id']}] {p['name']} | PKR {p['price_pkr']} | {p['color']}" for p in fallback[:2]]
+    main_line = (
+        f"[{prod['id']}] {prod['name']} | PKR {prod['price_pkr']} | "
+        f"Sizes: {prod['sizes']} | {prod['color']} | Stock: {prod['stock']}"
+    )
+    pair_lines = "\n".join(recs) if recs else "No pairings in stock."
+    return f"Item: {main_line}\nPairs with:\n{pair_lines}"
 
 
 @tool
 def save_user_preference(preference_key: str, preference_value: str, config: RunnableConfig) -> str:
-    """Save a lasting customer shopping preference (e.g. size, style, color, city, budget) to long-term memory."""
+    """Save customer preference (name, size, style, city, budget)."""
     if db.SENSITIVE_MEMORY_RE.search(preference_key or "") or db.SENSITIVE_MEMORY_RE.search(preference_value or ""):
         return "Cannot save sensitive payment or credential details in long-term memory."
     user_id = _get_user_id(config)
     saved = db.upsert_user_memory(user_id=user_id, mem_key=preference_key, mem_value=preference_value)
-    return f"Saved preference for your profile: {saved['mem_key']} = {saved['mem_value']}."
+    return f"Saved {saved['mem_key']}={saved['mem_value']}."
 
 
 @tool
 def calculate_order_total(product_id_or_name: str, quantity: int = 1) -> str:
-    """Calculate exact subtotal, shipping fee, and grand total in PKR using live server-side prices."""
+    """Calculate exact subtotal, shipping, and total in PKR."""
     if quantity <= 0:
         return "Quantity must be at least 1."
     prod = db.find_product(product_id_or_name)
@@ -139,31 +141,24 @@ def calculate_order_total(product_id_or_name: str, quantity: int = 1) -> str:
     subtotal = int(prod["price_pkr"]) * quantity
     shipping = db.compute_shipping(subtotal)
     total = subtotal + shipping
-    shipping_note = "FREE (orders >= PKR 6,000)" if shipping == 0 else f"PKR {shipping}"
+    shipping_note = "FREE (>= PKR 6000)" if shipping == 0 else f"PKR {shipping}"
     return (
-        f"Price Breakdown for {quantity}x {prod['name']} [{prod['id']}]:\n"
-        f"- Unit Price: PKR {prod['price_pkr']}\n"
-        f"- Subtotal: PKR {subtotal}\n"
-        f"- Delivery: {shipping_note}\n"
-        f"- Grand Total: PKR {total}\n"
-        f"- Available Stock: {prod['stock']}"
+        f"{quantity}x {prod['name']} [{prod['id']}]: Unit PKR {prod['price_pkr']} | "
+        f"Subtotal PKR {subtotal} | Delivery {shipping_note} | Total PKR {total} | Stock {prod['stock']}"
     )
 
 
 @tool
 def get_user_orders(config: RunnableConfig) -> str:
-    """Retrieve orders belonging exclusively to the current active customer."""
+    """List orders for the current customer."""
     user_id = _get_user_id(config)
     orders = db.list_orders(user_id=user_id)
     if not orders:
         return "You have no orders yet."
-    lines = []
-    for o in orders[:10]:
-        lines.append(
-            f"{o['id']} | {o['quantity']}x {o['product_name']} (Size {o['size']}) | "
-            f"Total: PKR {o['total_pkr']} | Status: {o['status']} | Deliver to: {o['delivery_address']}"
-        )
-    return "\n".join(lines)
+    return "\n".join(
+        f"{o['id']} | {o['quantity']}x {o['product_name']} ({o['size']}) | PKR {o['total_pkr']} | {o['status']} | {o['delivery_address']}"
+        for o in orders[:8]
+    )
 
 
 @tool
@@ -175,7 +170,7 @@ def place_order(
     confirmed: bool = False,
     config: RunnableConfig = None,
 ) -> str:
-    """Place a customer order. Must ONLY commit when the user explicitly confirmed in this turn."""
+    """Place an order only when the customer explicitly confirmed."""
     user_id = _get_user_id(config)
     prod = db.find_product(product_id_or_name)
     if not prod:
@@ -223,7 +218,7 @@ def place_order(
 
 @tool
 def cancel_order(order_id: str, confirmed: bool = False, config: RunnableConfig = None) -> str:
-    """Cancel an order belonging to the current customer after explicit confirmation."""
+    """Cancel a customer order after explicit confirmation."""
     user_id = _get_user_id(config)
     mine = [o for o in db.list_orders(user_id=user_id) if o["id"].upper() == order_id.strip().upper()]
     if not mine:
